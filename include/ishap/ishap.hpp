@@ -29,6 +29,13 @@
 
 namespace ishap::timestep {
 
+    inline constexpr double                     
+        k_hz_60                             = 60.0;
+    inline constexpr double                     
+        k_hz_120                            = 120.0;
+    inline constexpr double
+        k_hz_240                            = 240.0;
+
     inline constexpr std::chrono::nanoseconds   
         k_step_60hz                         { 16'666'667 }; // ~16.67ms
     inline constexpr std::chrono::nanoseconds   
@@ -49,6 +56,8 @@ namespace ishap::timestep {
 struct Config {
 	/// @brief Target fixed update step duration (default: ~16.67ms for 60Hz)
     std::chrono::nanoseconds 	step        						= k_step_60hz;
+    /// @brief Used for serialization to preserve "60.0" instead of "60.0000024".
+	double						target_hz							= k_hz_60;
 	/// @brief Time scale factor (default: 1.0 = normal time)
     double       				time_scale   						= k_default_time_scale;
 	/// @brief Safety max delta to prevent spiral of death (default: 250ms)
@@ -110,12 +119,23 @@ public:
     void   set_hz(double hz) noexcept            
 		{ 
             if (hz <= 0.0) return;
+            m_config.target_hz = hz;
             m_config.step = std::chrono::duration_cast
 			<std::chrono::nanoseconds>(std::chrono::duration<double>(1.0 / hz)); 
         }
 
-    /// @brief Get the current fixed update rate in Hertz.
+    /** 
+    * @brief Gets the target fixed update rate in Hertz.
+    * This may differ from the calculated rate due to rounding, use hz_calculated() for exact value. (60.0 for 16.67ms step)
+    */
 	[[nodiscard]] double hz() const noexcept                    
+		{ return m_config.target_hz; }
+
+    /** 
+    * @brief Gets the current fixed update rate in Hertz.
+    * This is calculated based on the actual step duration and may differ from the target rate. (60.0000024 for 16.67ms step)
+    */
+	[[nodiscard]] double hz_calculated() const noexcept                    
 		{ return 1.0 / std::chrono::duration<double>(m_config.step).count(); }
 
 	/**
@@ -125,6 +145,7 @@ public:
     void   set_step(std::chrono::nanoseconds s) noexcept { 
         if (s.count() <= 0) return;
         m_config.step = s; 
+        m_config.target_hz = 1.0 / (static_cast<double>(s.count()) * 1e-9);
     }
 
 	/// @brief Get the current fixed timestep duration in nanoseconds.
