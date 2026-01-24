@@ -3,7 +3,7 @@
   <p align="center"><b>Tiny Reusable Fixed-Timestep Runner</b></p>
 
   <p align="center">
-    <a href="https://github.com/mickryley/ishap"><img alt="Version" src="https://img.shields.io/badge/version-v0.1.0-lightblue.svg"></a>
+    <a href="https://github.com/mickryley/ishap"><img alt="Version" src="https://img.shields.io/badge/version-v0.3.0-lightblue.svg"></a>
     <a href="https://github.com/mickryley/ishap/commits/main"><img alt="Last Commit" src="https://img.shields.io/github/last-commit/mickryley/ishap.svg"></a>
     <a href="https://en.cppreference.com/w/cpp/compiler_support"><img alt="C++17+" src="https://img.shields.io/badge/C%2B%2B-17%2B-orange.svg"></a>
     <img alt="Header-only" src="https://img.shields.io/badge/Header--only-yes-success.svg">
@@ -19,6 +19,7 @@
 > It offers a clean, unit-safe API built on `std::chrono`, featuring precise clamping, scaling, and substep management.  
 > Designed as a dependable, zero-dependency utility for engines, simulations, and real-time systems.  
 > ☕ Made in an afternoon to keep everything running like clockwork.
+> **New in v0.3.0:** High-precision step sequencing to handle non-integer nanosecond frequencies (like 60Hz) without drift, now with **zero heap allocations** using `std::array`.
 
 ---
 
@@ -28,11 +29,13 @@
 |:--|:--|
 | 🕒 **Fixed timestep stepping** | via `tick()` or `push_time()` |
 | 🎯 **Deterministic updates** | when fed explicit `dt` |
+| 💎 **Sub-ns Precision** | Automated step-sequencing to eliminate timing drift |
 | ⚙️ **Unit-safe API** | built on `std::chrono` |
-| 🧩 **Time scaling**, **max delta clamp**, **substep cap** | for precise control |
+| 🧩 **Time scaling** | **Max delta clamp**, **substep cap**, and **accumulator management** |
 | 🚫 **Exception-safe** | internal try/catch preserves `noexcept` |
 | 💡 **Error hook support** | handle exceptions without breaking flow |
 | 🧱 **Header-only** | zero dependencies, drop-in ready |
+| 🧱 **Zero-Alloc** | No `std::vector` or heap usage beyond `std::function` |
 
 ---
 
@@ -68,6 +71,7 @@ int main() {
 | Field | Type | Default | Description |
 |:--|:--|:--|:--|
 | `step` | `std::chrono::nanoseconds` | ~16.67 ms | Fixed update timestep |
+| `target_hz` | `double` | `60.0` | Target frequency for serialization |
 | `time_scale` | `double` | `1.0` | Speed multiplier (`0.0` = paused) |
 | `safety_max_delta` | `std::chrono::nanoseconds` | 250 ms | Clamp for large frame gaps |
 | `safety_max_substeps` | `size_t` | 8 | Maximum fixed steps per tick |
@@ -83,7 +87,7 @@ include(FetchContent)
 FetchContent_Declare(
   ishap
   GIT_REPOSITORY https://github.com/mickryley/ishap.git
-  GIT_TAG        v0.1.0
+  GIT_TAG        v0.3.0
 )
 FetchContent_MakeAvailable(ishap)
 
@@ -95,6 +99,13 @@ target_link_libraries(your_target PRIVATE ishap::ishap)
 find_package(ishap CONFIG REQUIRED)
 target_link_libraries(your_target PRIVATE ishap::ishap)
 ```
+
+---
+
+🧩 The Drift Problem & Step Sequencing
+Standard `std::chrono::nanoseconds` are integers. However, 1/60s is exactly 16,666,666.666... nanoseconds. Over time, simply using 16ms or 16,666,667ns causes simulation drift.
+
+ishap solves this by generating a step_sequence. For 60Hz, it will automatically cycle through a sequence of steps (e.g., alternating between 16,666,667ns and 16,666,666ns) to ensure that over the long term, the average frequency is exactly 60.0 Hz.
 
 ---
 

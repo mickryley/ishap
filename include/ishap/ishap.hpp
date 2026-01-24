@@ -26,6 +26,8 @@
 #include <functional>
 #include <type_traits>
 #include <utility>
+#include <cmath>
+#include <array>
 
 namespace ishap::timestep {
 
@@ -52,12 +54,26 @@ namespace ishap::timestep {
     inline constexpr double                     
         k_default_time_scale                = 1.0;
 
+    /// @brief Maximum length for step sequence array
+    inline constexpr size_t k_max_step_sequence_length = 32;
+
+    /// @brief Epsilon for comparing step sequence timing
+    inline constexpr double k_step_sequence_epsilon = 1e-6;
+
 	/// @brief Configuration settings for the timestep runner
 struct Config {
 	/// @brief Target fixed update step duration (default: ~16.67ms for 60Hz)
     std::chrono::nanoseconds 	step        						= k_step_60hz;
     /// @brief Used for serialization to preserve "60.0" instead of "60.0000024".
 	double						target_hz							= k_hz_60;
+    /**
+    * @brief Optional sequence of steps to cycle through for high-precision timing.
+    * Used when 1.0/Hz does not divide cleanly into integers of nanoseconds (e.g., 1/60Hz = 16.666...ms).
+    * If empty, 'step' is used for all updates.
+    */
+    std::array<std::chrono::nanoseconds, k_max_step_sequence_length> step_sequence = {};
+    /// @brief Length of the step sequence in use (0 if not used)
+    size_t                      step_sequence_length                = 0;
 	/// @brief Time scale factor (default: 1.0 = normal time)
     double       				time_scale   						= k_default_time_scale;
 	/// @brief Safety max delta to prevent spiral of death (default: 250ms)
@@ -99,7 +115,7 @@ public:
 
 	/**
 	* @brief Advances the timestep runner using the current time from a steady clock.
-	* @return The interpolation alpha value in the range [0, 1), representing the
+	* @return The interpolation alpha value in the range [0, 1], representing the
 	*         fraction of the next fixed timestep that has been accumulated.
 	*/
     [[nodiscard]] double tick() noexcept { return tick_with_clock(steady_clock::now()); }
@@ -114,14 +130,42 @@ public:
 
     /**
 	* @brief Sets the target fixed update rate in Hertz.
+    * @details Automatically generates a vector of cycling timesteps if the Hz results
+    * in a non-integer nanosecond period (e.g. 30Hz), ensuring long-term timing accuracy.
 	* @param hz The desired update rate in Hertz. Must be positive.
 	*/
     void   set_hz(double hz) noexcept            
 		{ 
-            if (hz <= 0.0) return;
+            if (hz <= 0.0 || !std::isfinite(hz)) return;
             m_config.target_hz = hz;
             m_config.step = std::chrono::duration_cast
 			<std::chrono::nanoseconds>(std::chrono::duration<double>(1.0 / hz)); 
+            
+            // Generate step sequence for non-integer nanosecond periods
+            m_step_sequence_index = 0;
+            m_config.step_sequence.fill(std::chrono::nanoseconds(0));
+            m_config.step_sequence_length = 0;
+
+            double period_ns_double = 1e9 / hz;
+            double ideal_accum = 0.0;
+            int64_t discrete_accum = 0;
+
+            for (size_t i = 0; i < k_max_step_sequence_length; ++i) 
+            {
+                ideal_accum += period_ns_double;
+                int64_t target_discrete = static_cast<int64_t>(std::round(ideal_accum));
+                int64_t step_ns = target_discrete - discrete_accum;
+
+                m_config.step_sequence[i] = std::chrono::nanoseconds(step_ns);
+                discrete_accum += step_ns;
+                m_config.step_sequence_length++;
+
+                if (std::abs(ideal_accum - static_cast<double>(discrete_accum)) < k_step_sequence_epsilon)
+                {
+                    if (m_config.step_sequence_length <= 1) m_config.step_sequence_length = 0; // No sequence needed
+                    break;
+                }
+            }
         }
 
     /** 
@@ -145,8 +189,13 @@ public:
     void   set_step(std::chrono::nanoseconds s) noexcept { 
         if (s.count() <= 0) return;
         m_config.step = s; 
+        m_step_sequence_index = 0;
         m_config.target_hz = 1.0 / (static_cast<double>(s.count()) * 1e-9);
     }
+
+    /// @brief Get the time remaining to the next fixed step in nanoseconds.
+    [[nodiscard]] std::chrono::nanoseconds time_to_next_step() const noexcept
+        { return current_step_duration() - m_accumulator; }
 
 	/// @brief Get the current fixed timestep duration in nanoseconds.
     [[nodiscard]] std::chrono::nanoseconds step() const noexcept             
@@ -223,7 +272,7 @@ public:
 	*/
     [[nodiscard]] double alpha() const noexcept
 		{ return    static_cast<double>(m_accumulator.count()) /
-			        static_cast<double>(m_config.step.count()); 
+			        static_cast<double>(current_step_duration().count()); 
     }
 
      /// @brief Returns whether a step error was caught in user code during the last tick.
@@ -249,6 +298,14 @@ public:
          return static_cast<bool>(m_on_error_function); 
         }
 
+    /**
+    * @brief Helper to get the step duration for the current cycle index
+    */
+    [[nodiscard]] inline std::chrono::nanoseconds current_step_duration() const noexcept {
+        if (m_config.step_sequence_length > 0) 
+            return m_config.step_sequence[m_step_sequence_index];
+        return m_config.step;
+    }
 
 private:
     using steady_clock 				= std::chrono::steady_clock;
@@ -293,21 +350,28 @@ private:
 
         // Step Loop [with Safety Cap]
         size_t steps = 0;
-        while (m_accumulator >= m_config.step && steps < m_config.safety_max_substeps) {
+        std::chrono::nanoseconds current_step_dt = current_step_duration();
+        while (m_accumulator >= current_step_dt && steps < m_config.safety_max_substeps) {
             try {
-                if (m_on_update_function) m_on_update_function(m_config.step);
+                if (m_on_update_function) m_on_update_function(current_step_dt);
             } catch (...) {
                 m_step_error_caught = true;
                 if (m_on_error_function) m_on_error_function();
                 // Swallow exceptions from user code to maintain noexcept guarantee
             }
-            m_accumulator -= m_config.step;
+            m_accumulator -= current_step_dt;
             ++steps;
+
+            // Advance step sequence index if applicable
+            if (m_config.step_sequence_length > 0) {
+                m_step_sequence_index = (m_step_sequence_index + 1) % m_config.step_sequence_length;
+                current_step_dt = current_step_duration();
+            }
         }
         m_last_steps = steps;
 
 		// Trim excess accumulator [With Safety Cap]
-		const std::chrono::nanoseconds max_acc = m_config.step * m_config.safety_max_accumulator_overflow;
+		const std::chrono::nanoseconds max_acc = current_step_dt * m_config.safety_max_accumulator_overflow;
 		if (m_accumulator > max_acc) { m_accumulator = max_acc; }
 		
         // Return (trimmed) alpha for interpolation into next step
@@ -324,6 +388,8 @@ private:
     steady_clock::time_point      	m_last{};
 	/// @brief Accumulator for leftover time between steps
     std::chrono::nanoseconds      	m_accumulator{0};
+    /// @brief Index into step_sequence for cycling timesteps
+    size_t                        	m_step_sequence_index{0};
 	/// @brief Paused state
     bool                          	m_paused{false};
 
