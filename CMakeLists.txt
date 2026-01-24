@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(ishap VERSION 0.1.0 LANGUAGES CXX)
+project(ishap VERSION 0.4.0 LANGUAGES CXX)
 
 add_library (ishap INTERFACE)
 add_library(ishap::ishap ALIAS ishap)
@@ -10,6 +10,16 @@ target_include_directories (ishap INTERFACE
 )
 
 target_compile_features(ishap INTERFACE cxx_std_17)
+
+# Testing Block
+option(ISHAP_BUILD_TESTS "Build tests for ishap" ON)
+
+if(ISHAP_BUILD_TESTS AND CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+    include(CTest)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+# End Testing Block
 
 include(CMakePackageConfigHelpers)
 

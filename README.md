@@ -5,6 +5,7 @@
   <p align="center">
     <a href="https://github.com/mickryley/ishap"><img alt="Version" src="https://img.shields.io/badge/version-v0.3.0-lightblue.svg"></a>
     <a href="https://github.com/mickryley/ishap/commits/main"><img alt="Last Commit" src="https://img.shields.io/github/last-commit/mickryley/ishap.svg"></a>
+    <a href="https://github.com/mickryley/ishap/actions/workflows/testing"><img alt="Build Status" src="https://github.com/mickryley/ishap/actions/workflows/testing.yml/badge.svg"></a>
     <a href="https://en.cppreference.com/w/cpp/compiler_support"><img alt="C++17+" src="https://img.shields.io/badge/C%2B%2B-17%2B-orange.svg"></a>
     <img alt="Header-only" src="https://img.shields.io/badge/Header--only-yes-success.svg">
     <a href="https://cmake.org"><img alt="CMake 3.15+" src="https://img.shields.io/badge/CMake-3.15%2B-informational.svg"></a>

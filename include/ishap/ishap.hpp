@@ -179,7 +179,7 @@ public:
     * @brief Gets the current fixed update rate in Hertz.
     * This is calculated based on the actual step duration and may differ from the target rate. (60.0000024 for 16.67ms step)
     */
-	[[nodiscard]] double hz_calculated() const noexcept                    
+	[[nodiscard]] constexpr double hz_calculated() const noexcept                    
 		{ return 1.0 / std::chrono::duration<double>(m_config.step).count(); }
 
 	/**
@@ -189,6 +189,7 @@ public:
     void   set_step(std::chrono::nanoseconds s) noexcept { 
         if (s.count() <= 0) return;
         m_config.step = s; 
+        m_config.step_sequence_length = 0;
         m_step_sequence_index = 0;
         m_config.target_hz = 1.0 / (static_cast<double>(s.count()) * 1e-9);
     }
@@ -198,7 +199,7 @@ public:
         { return current_step_duration() - m_accumulator; }
 
 	/// @brief Get the current fixed timestep duration in nanoseconds.
-    [[nodiscard]] std::chrono::nanoseconds step() const noexcept             
+    [[nodiscard]] constexpr std::chrono::nanoseconds step() const noexcept             
         { return m_config.step; }
 
 	/**
