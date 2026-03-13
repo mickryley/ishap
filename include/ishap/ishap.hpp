@@ -11,10 +11,10 @@
 // Usage
 //   ishap::timestep::FixedTimestepRunner runner{
 //       [](std::chrono::nanoseconds dt){ /* fixed update */ },
-//       {.step = 16ms, .max_delta = 250ms, .max_substeps = 8, .time_scale = 1.0}
+//       ishap::timestep::standards::k_config_ntsc_double_5994
 //   };
 //   for (;;) {
-//       // Game loop …
+//       // Game/Film/Robotics loop …
 //       const double a = runner.tick(); // or runner.push_time(frame_dt);
 //       // render(interpolate(a));
 //   }
@@ -30,29 +30,42 @@
 #include <array>
 
 namespace ishap::timestep {
+    namespace standards {
+        inline constexpr double k_hz_cinema = 24.0;
+        inline constexpr double k_hz_pal = 25.0;
+        inline constexpr double k_hz_ntsc_film = 24.0 * 1000.0 / 1001.0;    // ~23.976
+        inline constexpr double k_hz_ntsc_video = 30.0 * 1000.0 / 1001.0;   // ~29.97
+        inline constexpr double k_hz_hfr_cinema = 48.0;
+        inline constexpr double k_hz_pal_double = 50.0;
+        inline constexpr double k_hz_ntsc_double = 60.0 * 1000.0 / 1001.0;  // ~59.94
+        inline constexpr double k_hz_ntsc_120 = 120.0 * 1000.0 / 1001.0;    // ~119.88
 
-    inline constexpr double                     
-        k_hz_60                             = 60.0;
-    inline constexpr double                     
-        k_hz_120                            = 120.0;
-    inline constexpr double
-        k_hz_240                            = 240.0;
+        inline constexpr double k_hz_12 = 12.0;
+        inline constexpr double k_hz_15 = 15.0;
+        inline constexpr double k_hz_20 = 20.0;
+        inline constexpr double k_hz_30 = 30.0;
 
-    inline constexpr std::chrono::nanoseconds   
-        k_step_60hz                         { 16'666'667 }; // ~16.67ms
-    inline constexpr std::chrono::nanoseconds   
-        k_step_120hz                        { 8'333'333 };  // ~8.33ms
-    inline constexpr std::chrono::nanoseconds   
-        k_step_240hz                        { 4'166'667 };  // ~4.17ms
+        inline constexpr double k_hz_60 = 60.0;
+        inline constexpr double k_hz_72 = 72.0;
+        inline constexpr double k_hz_75 = 75.0;
+        inline constexpr double k_hz_80 = 80.0;
+        inline constexpr double k_hz_90 = 90.0;
+        inline constexpr double k_hz_120 = 120.0;
+        inline constexpr double k_hz_144 = 144.0;
+        inline constexpr double k_hz_240 = 240.0;
+        inline constexpr double k_hz_360 = 360.0;
 
-    inline constexpr std::chrono::nanoseconds   
-        k_default_max_delta                 { 250'000'000 }; // 250ms
-    inline constexpr size_t                     
-        k_default_max_substeps              = 8;
-    inline constexpr size_t                     
-        k_default_max_accumulator_overflow  = 3;
-    inline constexpr double                     
-        k_default_time_scale                = 1.0;
+        inline constexpr double k_hz_250 = 250.0;
+        inline constexpr double k_hz_500 = 500.0;
+        inline constexpr double k_hz_1000 = 1000.0;
+        inline constexpr double k_hz_2000 = 2000.0;
+        inline constexpr double k_hz_4000 = 4000.0;
+        inline constexpr double k_hz_8000 = 8000.0;
+    }
+    inline constexpr std::chrono::nanoseconds   k_default_max_delta{ 250'000'000 }; // 250ms
+    inline constexpr size_t                     k_default_max_substeps = 8;
+    inline constexpr size_t                     k_default_max_accumulator_overflow = 3;
+    inline constexpr double                     k_default_time_scale = 1.0;
 
     /// @brief Maximum length for step sequence array
     inline constexpr size_t k_max_step_sequence_length = 32;
@@ -63,9 +76,9 @@ namespace ishap::timestep {
 	/// @brief Configuration settings for the timestep runner
 struct Config {
 	/// @brief Target fixed update step duration (default: ~16.67ms for 60Hz)
-    std::chrono::nanoseconds 	step        						= k_step_60hz;
+    std::chrono::nanoseconds 	step        						= std::chrono::nanoseconds(16'666'666);
     /// @brief Used for serialization to preserve "60.0" instead of "60.0000024".
-	double						target_hz							= k_hz_60;
+	double						target_hz							= standards::k_hz_60;
     /**
     * @brief Optional sequence of steps to cycle through for high-precision timing.
     * Used when 1.0/Hz does not divide cleanly into integers of nanoseconds (e.g., 1/60Hz = 16.666...ms).
@@ -82,7 +95,75 @@ struct Config {
     size_t          			safety_max_substeps 				= k_default_max_substeps;
 	/// @brief Safety max accumulator overflow multiplier (default: 3)
 	size_t 						safety_max_accumulator_overflow 	= k_default_max_accumulator_overflow;
+
+    /// @brief Generates a Config with a pre-calculated step sequence for a given Hz
+    [[nodiscard]] static constexpr Config from_hz(double hz) noexcept {
+        Config config{};
+        config.target_hz = hz;
+        if (hz <= 0.0) return config;
+
+        config.step = std::chrono::nanoseconds(static_cast<int64_t>(1'000'000'000.0 / hz));
+
+        double period_ns = 1'000'000'000.0 / hz;
+        double ideal_accum = 0.0;
+        int64_t discrete_accum = 0;
+
+        for (size_t i = 0; i < k_max_step_sequence_length; ++i) {
+            ideal_accum += period_ns;
+
+            // Constexpr-safe rounding (+0.5 instead of std::round)
+            int64_t target_discrete = static_cast<int64_t>(ideal_accum + 0.5);
+            int64_t step_ns = target_discrete - discrete_accum;
+
+            config.step_sequence[i] = std::chrono::nanoseconds(step_ns);
+            discrete_accum += step_ns;
+            config.step_sequence_length++;
+
+            // Constexpr-safe absolute value (no std::abs)
+            double diff = ideal_accum - static_cast<double>(discrete_accum);
+            if (diff < 0.0) diff = -diff;
+
+            if (diff < k_step_sequence_epsilon) {
+                if (config.step_sequence_length <= 1) config.step_sequence_length = 0;
+                break;
+            }
+        }
+        return config;
+    }
 };
+
+namespace standards {
+    inline constexpr Config k_config_cinema_24 = Config::from_hz(k_hz_cinema);
+    inline constexpr Config k_config_pal_25 = Config::from_hz(k_hz_pal);
+    inline constexpr Config k_config_ntsc_film_23976 = Config::from_hz(k_hz_ntsc_film);
+    inline constexpr Config k_config_ntsc_video_2997 = Config::from_hz(k_hz_ntsc_video);
+    inline constexpr Config k_config_hfr_cinema_48 = Config::from_hz(k_hz_hfr_cinema);
+    inline constexpr Config k_config_pal_double_50 = Config::from_hz(k_hz_pal_double);
+    inline constexpr Config k_config_ntsc_double_5994 = Config::from_hz(k_hz_ntsc_double);
+    inline constexpr Config k_config_ntsc_120_11988 = Config::from_hz(k_hz_ntsc_120);
+
+    inline constexpr Config k_config_12 = Config::from_hz(k_hz_12);
+    inline constexpr Config k_config_15 = Config::from_hz(k_hz_15);
+    inline constexpr Config k_config_20 = Config::from_hz(k_hz_20);
+    inline constexpr Config k_config_30 = Config::from_hz(k_hz_30);
+
+    inline constexpr Config k_config_60 = Config::from_hz(k_hz_60);
+    inline constexpr Config k_config_72 = Config::from_hz(k_hz_72);
+    inline constexpr Config k_config_75 = Config::from_hz(k_hz_75);
+    inline constexpr Config k_config_80 = Config::from_hz(k_hz_80);
+    inline constexpr Config k_config_90 = Config::from_hz(k_hz_90);
+    inline constexpr Config k_config_120 = Config::from_hz(k_hz_120);
+    inline constexpr Config k_config_144 = Config::from_hz(k_hz_144);
+    inline constexpr Config k_config_240 = Config::from_hz(k_hz_240);
+    inline constexpr Config k_config_360 = Config::from_hz(k_hz_360);
+
+    inline constexpr Config k_config_250 = Config::from_hz(k_hz_250);
+    inline constexpr Config k_config_500 = Config::from_hz(k_hz_500);
+    inline constexpr Config k_config_1000 = Config::from_hz(k_hz_1000);
+    inline constexpr Config k_config_2000 = Config::from_hz(k_hz_2000);
+    inline constexpr Config k_config_4000 = Config::from_hz(k_hz_4000);
+    inline constexpr Config k_config_8000 = Config::from_hz(k_hz_8000);
+}
 
 /// @brief Fixed timestep runner for deterministic updates
 class FixedTimestepRunner {
@@ -97,7 +178,7 @@ public:
 	* @param fn The function to call for each fixed update step. It takes a single parameter of type std::chrono::nanoseconds representing the fixed timestep duration.
 	* @param config The configuration for the timestep runner. Default values are provided if not specified
 	*/
-    explicit FixedTimestepRunner(OnStepFunction fn, Config config = {})
+    explicit FixedTimestepRunner(OnStepFunction fn, Config config = standards::k_config_60)
         : m_on_update_function(std::move(fn)), m_config(std::move(config)) { reset(true); }
 
     /**
@@ -106,7 +187,7 @@ public:
 	* This effectively starts the timing from now, avoiding a large initial delta on the first tick
 	*/
     void reset(bool start_now = true) noexcept {
-        m_accumulator 			= std::chrono::nanoseconds(0); 
+        m_accumulator 			= std::chrono::nanoseconds(0);
         m_last_delta 			= std::chrono::nanoseconds(0);
         m_last_steps 			= 0;
         m_paused 				= false;
@@ -134,61 +215,38 @@ public:
     * in a non-integer nanosecond period (e.g. 30Hz), ensuring long-term timing accuracy.
 	* @param hz The desired update rate in Hertz. Must be positive.
 	*/
-    void   set_hz(double hz) noexcept            
-		{ 
+    void   set_hz(double hz) noexcept
+		{
             if (hz <= 0.0 || !std::isfinite(hz)) return;
-            m_config.target_hz = hz;
-            m_config.step = std::chrono::duration_cast
-			<std::chrono::nanoseconds>(std::chrono::duration<double>(1.0 / hz)); 
-            
-            // Generate step sequence for non-integer nanosecond periods
+            Config config_timing = Config::from_hz(hz);
+            m_config.target_hz = config_timing.target_hz;
+            m_config.step = config_timing.step;
+			m_config.step_sequence = config_timing.step_sequence;
+			m_config.step_sequence_length = config_timing.step_sequence_length;
             m_step_sequence_index = 0;
-            m_config.step_sequence.fill(std::chrono::nanoseconds(0));
-            m_config.step_sequence_length = 0;
-
-            double period_ns_double = 1e9 / hz;
-            double ideal_accum = 0.0;
-            int64_t discrete_accum = 0;
-
-            for (size_t i = 0; i < k_max_step_sequence_length; ++i) 
-            {
-                ideal_accum += period_ns_double;
-                int64_t target_discrete = static_cast<int64_t>(std::round(ideal_accum));
-                int64_t step_ns = target_discrete - discrete_accum;
-
-                m_config.step_sequence[i] = std::chrono::nanoseconds(step_ns);
-                discrete_accum += step_ns;
-                m_config.step_sequence_length++;
-
-                if (std::abs(ideal_accum - static_cast<double>(discrete_accum)) < k_step_sequence_epsilon)
-                {
-                    if (m_config.step_sequence_length <= 1) m_config.step_sequence_length = 0; // No sequence needed
-                    break;
-                }
-            }
         }
 
-    /** 
+    /**
     * @brief Gets the target fixed update rate in Hertz.
     * This may differ from the calculated rate due to rounding, use hz_calculated() for exact value. (60.0 for 16.67ms step)
     */
-	[[nodiscard]] double hz() const noexcept                    
+	[[nodiscard]] double hz() const noexcept
 		{ return m_config.target_hz; }
 
-    /** 
+    /**
     * @brief Gets the current fixed update rate in Hertz.
     * This is calculated based on the actual step duration and may differ from the target rate. (60.0000024 for 16.67ms step)
     */
-	[[nodiscard]] constexpr double hz_calculated() const noexcept                    
+	[[nodiscard]] constexpr double hz_calculated() const noexcept
 		{ return 1.0 / std::chrono::duration<double>(m_config.step).count(); }
 
 	/**
 	* @brief Sets the fixed timestep duration.
 	* @param s The desired fixed timestep duration as a std::chrono::nanoseconds duration.
 	*/
-    void   set_step(std::chrono::nanoseconds s) noexcept { 
+    void   set_step(std::chrono::nanoseconds s) noexcept {
         if (s.count() <= 0) return;
-        m_config.step = s; 
+        m_config.step = s;
         m_config.step_sequence_length = 0;
         m_step_sequence_index = 0;
         m_config.target_hz = 1.0 / (static_cast<double>(s.count()) * 1e-9);
@@ -199,7 +257,7 @@ public:
         { return current_step_duration() - m_accumulator; }
 
 	/// @brief Get the current fixed timestep duration in nanoseconds.
-    [[nodiscard]] constexpr std::chrono::nanoseconds step() const noexcept             
+    [[nodiscard]] constexpr std::chrono::nanoseconds step() const noexcept
         { return m_config.step; }
 
 	/**
@@ -208,7 +266,7 @@ public:
 	*/
     void   set_max_delta(std::chrono::nanoseconds d) noexcept {
         if (d.count() <= 0) return;
-        m_config.safety_max_delta = d; 
+        m_config.safety_max_delta = d;
         }
 
 	/// @brief Get the current maximum allowed delta time in nanoseconds.
@@ -219,8 +277,8 @@ public:
 	* @brief Sets the maximum number of fixed update steps to perform per tick to prevent spiral of death.
 	* @param n The maximum number of substeps. Must be positive.
 	*/
-    void    set_max_substeps(size_t n) noexcept { 
-        m_config.safety_max_substeps = (n > 0 ? n : size_t{1}); 
+    void    set_max_substeps(size_t n) noexcept {
+        m_config.safety_max_substeps = (n > 0 ? n : size_t{1});
     }
 	/// @brief Get the current maximum number of fixed update steps per tick.
     [[nodiscard]] size_t    max_substeps() const noexcept     { return m_config.safety_max_substeps; }
@@ -234,7 +292,7 @@ public:
 	*/
     void   set_time_scale(double s) noexcept {
         if (s < 0.0) s = 0.0;
-         m_config.time_scale = s; 
+         m_config.time_scale = s;
         }
 	/// @brief Get the current time scale factor.
     [[nodiscard]] double time_scale() const noexcept            { return m_config.time_scale; }
@@ -261,19 +319,19 @@ public:
 	* @brief Get the last frame's raw delta time before clamping and time scaling.
 	* @return The last frame's delta time as a std::chrono::nanoseconds duration.
 	*/
-    [[nodiscard]] std::chrono::nanoseconds  last_delta() const noexcept     { return m_last_delta; } 
+    [[nodiscard]] std::chrono::nanoseconds  last_delta() const noexcept     { return m_last_delta; }
 	/**
 	* @brief Get the number of fixed update steps executed in the last tick.
 	* @return The number of fixed update steps executed during the last call to tick() or push_time().
 	*/
-    [[nodiscard]] size_t                    last_steps() const noexcept     { return m_last_steps; } 
+    [[nodiscard]] size_t                    last_steps() const noexcept     { return m_last_steps; }
 	/**
 	* @brief Get the interpolation factor for the last frame.
 	* @return The interpolation factor as a double in the range [0, 1].
 	*/
     [[nodiscard]] double alpha() const noexcept
 		{ return    static_cast<double>(m_accumulator.count()) /
-			        static_cast<double>(current_step_duration().count()); 
+			        static_cast<double>(current_step_duration().count());
     }
 
      /// @brief Returns whether a step error was caught in user code during the last tick.
@@ -296,14 +354,14 @@ public:
     void set_error_function(OnErrorFunction fn) { m_on_error_function = std::move(fn); }
     /// @brief Returns whether an error function is set.
     [[nodiscard]] bool has_error_function() const noexcept {
-         return static_cast<bool>(m_on_error_function); 
+         return static_cast<bool>(m_on_error_function);
         }
 
     /**
     * @brief Helper to get the step duration for the current cycle index
     */
     [[nodiscard]] inline std::chrono::nanoseconds current_step_duration() const noexcept {
-        if (m_config.step_sequence_length > 0) 
+        if (m_config.step_sequence_length > 0)
             return m_config.step_sequence[m_step_sequence_index];
         return m_config.step;
     }
@@ -374,7 +432,7 @@ private:
 		// Trim excess accumulator [With Safety Cap]
 		const std::chrono::nanoseconds max_acc = current_step_dt * m_config.safety_max_accumulator_overflow;
 		if (m_accumulator > max_acc) { m_accumulator = max_acc; }
-		
+
         // Return (trimmed) alpha for interpolation into next step
         return alpha();
     }
