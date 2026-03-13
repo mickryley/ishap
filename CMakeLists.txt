@@ -1,15 +1,21 @@
 cmake_minimum_required(VERSION 3.15)
-project(ishap VERSION 0.4.0 LANGUAGES CXX)
+project(ishap VERSION 0.5.0 LANGUAGES CXX)
 
 add_library (ishap INTERFACE)
 add_library(ishap::ishap ALIAS ishap)
 
-target_include_directories (ishap INTERFACE 
+target_include_directories (ishap INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 
-target_compile_features(ishap INTERFACE cxx_std_17)
+target_compile_features(ishap INTERFACE cxx_std_20)
+
+# Stats tracking (on by default; propagates to all consumers via INTERFACE)
+option(ISHAP_DISABLE_STATS "Disable cumulative Stats counters (removes Stats struct, stats(), reset_stats(), and all counter increments)" OFF)
+if(ISHAP_DISABLE_STATS)
+    target_compile_definitions(ishap INTERFACE ISHAP_DISABLE_STATS)
+endif()
 
 # Testing Block
 option(ISHAP_BUILD_TESTS "Build tests for ishap" ON)

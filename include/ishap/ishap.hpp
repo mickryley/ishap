@@ -21,13 +21,14 @@
 //
 #pragma once
 
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <type_traits>
 #include <utility>
-#include <cmath>
-#include <array>
 
 namespace ishap::timestep {
     namespace standards {
@@ -39,12 +40,10 @@ namespace ishap::timestep {
         inline constexpr double k_hz_pal_double = 50.0;
         inline constexpr double k_hz_ntsc_double = 60.0 * 1000.0 / 1001.0;  // ~59.94
         inline constexpr double k_hz_ntsc_120 = 120.0 * 1000.0 / 1001.0;    // ~119.88
-
         inline constexpr double k_hz_12 = 12.0;
         inline constexpr double k_hz_15 = 15.0;
         inline constexpr double k_hz_20 = 20.0;
         inline constexpr double k_hz_30 = 30.0;
-
         inline constexpr double k_hz_60 = 60.0;
         inline constexpr double k_hz_72 = 72.0;
         inline constexpr double k_hz_75 = 75.0;
@@ -54,7 +53,6 @@ namespace ishap::timestep {
         inline constexpr double k_hz_144 = 144.0;
         inline constexpr double k_hz_240 = 240.0;
         inline constexpr double k_hz_360 = 360.0;
-
         inline constexpr double k_hz_250 = 250.0;
         inline constexpr double k_hz_500 = 500.0;
         inline constexpr double k_hz_1000 = 1000.0;
@@ -62,6 +60,7 @@ namespace ishap::timestep {
         inline constexpr double k_hz_4000 = 4000.0;
         inline constexpr double k_hz_8000 = 8000.0;
     }
+
     inline constexpr std::chrono::nanoseconds   k_default_max_delta{ 250'000'000 }; // 250ms
     inline constexpr size_t                     k_default_max_substeps = 8;
     inline constexpr size_t                     k_default_max_accumulator_overflow = 3;
@@ -73,395 +72,424 @@ namespace ishap::timestep {
     /// @brief Epsilon for comparing step sequence timing
     inline constexpr double k_step_sequence_epsilon = 1e-6;
 
-	/// @brief Configuration settings for the timestep runner
-struct Config {
-	/// @brief Target fixed update step duration (default: ~16.67ms for 60Hz)
-    std::chrono::nanoseconds 	step        						= std::chrono::nanoseconds(16'666'666);
-    /// @brief Used for serialization to preserve "60.0" instead of "60.0000024".
-	double						target_hz							= standards::k_hz_60;
+#ifndef ISHAP_DISABLE_STATS
     /**
-    * @brief Optional sequence of steps to cycle through for high-precision timing.
-    * Used when 1.0/Hz does not divide cleanly into integers of nanoseconds (e.g., 1/60Hz = 16.666...ms).
-    * If empty, 'step' is used for all updates.
+    * @brief Cumulative diagnostic counters.Access via stats(), reset via reset_stats().
+    * Define ISHAP_DISABLE_STATS before including this header (or via CMake) to compile
+    * out all tracking and remove the Stats member entirely.
     */
-    std::array<std::chrono::nanoseconds, k_max_step_sequence_length> step_sequence = {};
-    /// @brief Length of the step sequence in use (0 if not used)
-    size_t                      step_sequence_length                = 0;
-	/// @brief Time scale factor (default: 1.0 = normal time)
-    double       				time_scale   						= k_default_time_scale;
-	/// @brief Safety max delta to prevent spiral of death (default: 250ms)
-    std::chrono::nanoseconds 	safety_max_delta   					= k_default_max_delta;
-	/// @brief Safety max substeps to prevent spiral of death (default: 8)
-    size_t          			safety_max_substeps 				= k_default_max_substeps;
-	/// @brief Safety max accumulator overflow multiplier (default: 3)
-	size_t 						safety_max_accumulator_overflow 	= k_default_max_accumulator_overflow;
+    struct Stats {
+        size_t total_steps{0};          ///< Fixed steps executed across all ticks
+        size_t total_ticks{0};          ///< Total tick() / push_time() calls
+        size_t dropped_step_events{0};  ///< Times the substep cap was reached (steps were skipped)
+        size_t clamped_delta_events{0}; ///< Times the max-delta clamp was applied
+    };
+#endif
 
-    /// @brief Generates a Config with a pre-calculated step sequence for a given Hz
-    [[nodiscard]] static constexpr Config from_hz(double hz) noexcept {
-        Config config{};
-        config.target_hz = hz;
-        if (hz <= 0.0) return config;
+	/// @brief Configuration settings for the timestep runner
+    struct Config {
+        /// @brief Target fixed update step duration (default: ~16.67ms for 60Hz)
+        std::chrono::nanoseconds 	step        						= std::chrono::nanoseconds(16'666'666);
+        /// @brief Used for serialization to preserve "60.0" instead of "60.0000024".
+        double						target_hz							= standards::k_hz_60;
+        /**
+        * @brief Optional sequence of steps to cycle through for high-precision timing.
+        * Used when 1.0/Hz does not divide cleanly into integers of nanoseconds (e.g., 1/60Hz = 16.666...ms).
+        * If empty, 'step' is used for all updates.
+        */
+        std::array<std::chrono::nanoseconds, k_max_step_sequence_length> step_sequence = {};
+        /// @brief Length of the step sequence in use (0 if not used)
+        size_t                      step_sequence_length                = 0;
+        /// @brief Time scale factor (default: 1.0 = normal time)
+        double       				time_scale   						= k_default_time_scale;
+        /// @brief Safety max delta to prevent spiral of death (default: 250ms)
+        std::chrono::nanoseconds 	safety_max_delta   					= k_default_max_delta;
+        /// @brief Safety max substeps to prevent spiral of death (default: 8)
+        size_t          			safety_max_substeps 				= k_default_max_substeps;
+        /// @brief Safety max accumulator overflow multiplier (default: 3)
+        size_t 						safety_max_accumulator_overflow 	= k_default_max_accumulator_overflow;
 
-        config.step = std::chrono::nanoseconds(static_cast<int64_t>(1'000'000'000.0 / hz));
+        /// @brief Generates a Config with a pre-calculated step sequence for a given Hz
+        [[nodiscard]] static constexpr Config from_hz(double hz) noexcept {
+            Config config{};
+            config.target_hz = hz;
+            if (hz <= 0.0) return config;
 
-        double period_ns = 1'000'000'000.0 / hz;
-        double ideal_accum = 0.0;
-        int64_t discrete_accum = 0;
+            config.step = std::chrono::nanoseconds(static_cast<int64_t>(1'000'000'000.0 / hz));
 
-        for (size_t i = 0; i < k_max_step_sequence_length; ++i) {
-            ideal_accum += period_ns;
+            double period_ns = 1'000'000'000.0 / hz;
+            double ideal_accum = 0.0;
+            int64_t discrete_accum = 0;
 
-            // Constexpr-safe rounding (+0.5 instead of std::round)
-            int64_t target_discrete = static_cast<int64_t>(ideal_accum + 0.5);
-            int64_t step_ns = target_discrete - discrete_accum;
+            for (size_t i = 0; i < k_max_step_sequence_length; ++i) {
+                ideal_accum += period_ns;
 
-            config.step_sequence[i] = std::chrono::nanoseconds(step_ns);
-            discrete_accum += step_ns;
-            config.step_sequence_length++;
+                int64_t target_discrete = static_cast<int64_t>(ideal_accum + 0.5);
+                int64_t step_ns = target_discrete - discrete_accum;
 
-            // Constexpr-safe absolute value (no std::abs)
-            double diff = ideal_accum - static_cast<double>(discrete_accum);
-            if (diff < 0.0) diff = -diff;
+                config.step_sequence[i] = std::chrono::nanoseconds(step_ns);
+                discrete_accum += step_ns;
+                config.step_sequence_length++;
 
-            if (diff < k_step_sequence_epsilon) {
-                if (config.step_sequence_length <= 1) config.step_sequence_length = 0;
-                break;
+                double diff = ideal_accum - static_cast<double>(discrete_accum);
+                if (diff < 0.0) diff = -diff;
+
+                if (diff < k_step_sequence_epsilon) {
+                    if (config.step_sequence_length <= 1) config.step_sequence_length = 0;
+                    break;
+                }
             }
+            return config;
         }
-        return config;
-    }
-};
+    };
 
-namespace standards {
-    inline constexpr Config k_config_cinema_24 = Config::from_hz(k_hz_cinema);
-    inline constexpr Config k_config_pal_25 = Config::from_hz(k_hz_pal);
-    inline constexpr Config k_config_ntsc_film_23976 = Config::from_hz(k_hz_ntsc_film);
-    inline constexpr Config k_config_ntsc_video_2997 = Config::from_hz(k_hz_ntsc_video);
-    inline constexpr Config k_config_hfr_cinema_48 = Config::from_hz(k_hz_hfr_cinema);
-    inline constexpr Config k_config_pal_double_50 = Config::from_hz(k_hz_pal_double);
-    inline constexpr Config k_config_ntsc_double_5994 = Config::from_hz(k_hz_ntsc_double);
-    inline constexpr Config k_config_ntsc_120_11988 = Config::from_hz(k_hz_ntsc_120);
-
-    inline constexpr Config k_config_12 = Config::from_hz(k_hz_12);
-    inline constexpr Config k_config_15 = Config::from_hz(k_hz_15);
-    inline constexpr Config k_config_20 = Config::from_hz(k_hz_20);
-    inline constexpr Config k_config_30 = Config::from_hz(k_hz_30);
-
-    inline constexpr Config k_config_60 = Config::from_hz(k_hz_60);
-    inline constexpr Config k_config_72 = Config::from_hz(k_hz_72);
-    inline constexpr Config k_config_75 = Config::from_hz(k_hz_75);
-    inline constexpr Config k_config_80 = Config::from_hz(k_hz_80);
-    inline constexpr Config k_config_90 = Config::from_hz(k_hz_90);
-    inline constexpr Config k_config_120 = Config::from_hz(k_hz_120);
-    inline constexpr Config k_config_144 = Config::from_hz(k_hz_144);
-    inline constexpr Config k_config_240 = Config::from_hz(k_hz_240);
-    inline constexpr Config k_config_360 = Config::from_hz(k_hz_360);
-
-    inline constexpr Config k_config_250 = Config::from_hz(k_hz_250);
-    inline constexpr Config k_config_500 = Config::from_hz(k_hz_500);
-    inline constexpr Config k_config_1000 = Config::from_hz(k_hz_1000);
-    inline constexpr Config k_config_2000 = Config::from_hz(k_hz_2000);
-    inline constexpr Config k_config_4000 = Config::from_hz(k_hz_4000);
-    inline constexpr Config k_config_8000 = Config::from_hz(k_hz_8000);
-}
-
-/// @brief Fixed timestep runner for deterministic updates
-class FixedTimestepRunner {
-public:
-    using OnStepFunction = std::function<void(std::chrono::nanoseconds)>;
-    using OnErrorFunction = std::function<void()>;
-
-    FixedTimestepRunner() = default;
-
-	/**
-	* @brief Constructs a FixedTimestepRunner with the given update function and configuration.
-	* @param fn The function to call for each fixed update step. It takes a single parameter of type std::chrono::nanoseconds representing the fixed timestep duration.
-	* @param config The configuration for the timestep runner. Default values are provided if not specified
-	*/
-    explicit FixedTimestepRunner(OnStepFunction fn, Config config = standards::k_config_60)
-        : m_on_update_function(std::move(fn)), m_config(std::move(config)) { reset(true); }
-
-    /**
-	* @brief Resets the internal state of the timestep runner.
-	* @param start_now If true, sets the last time point to the current time. Default is true.
-	* This effectively starts the timing from now, avoiding a large initial delta on the first tick
-	*/
-    void reset(bool start_now = true) noexcept {
-        m_accumulator 			= std::chrono::nanoseconds(0);
-        m_last_delta 			= std::chrono::nanoseconds(0);
-        m_last_steps 			= 0;
-        m_paused 				= false;
-        if (start_now) m_last 	= steady_clock::now();
+    namespace standards {
+        inline constexpr Config k_config_cinema_24         = Config::from_hz(k_hz_cinema);
+        inline constexpr Config k_config_pal_25            = Config::from_hz(k_hz_pal);
+        inline constexpr Config k_config_ntsc_film_23976   = Config::from_hz(k_hz_ntsc_film);
+        inline constexpr Config k_config_ntsc_video_2997   = Config::from_hz(k_hz_ntsc_video);
+        inline constexpr Config k_config_hfr_cinema_48     = Config::from_hz(k_hz_hfr_cinema);
+        inline constexpr Config k_config_pal_double_50     = Config::from_hz(k_hz_pal_double);
+        inline constexpr Config k_config_ntsc_double_5994  = Config::from_hz(k_hz_ntsc_double);
+        inline constexpr Config k_config_ntsc_120_11988    = Config::from_hz(k_hz_ntsc_120);
+        inline constexpr Config k_config_12                = Config::from_hz(k_hz_12);
+        inline constexpr Config k_config_15                = Config::from_hz(k_hz_15);
+        inline constexpr Config k_config_20                = Config::from_hz(k_hz_20);
+        inline constexpr Config k_config_30                = Config::from_hz(k_hz_30);
+        inline constexpr Config k_config_60                = Config::from_hz(k_hz_60);
+        inline constexpr Config k_config_72                = Config::from_hz(k_hz_72);
+        inline constexpr Config k_config_75                = Config::from_hz(k_hz_75);
+        inline constexpr Config k_config_80                = Config::from_hz(k_hz_80);
+        inline constexpr Config k_config_90                = Config::from_hz(k_hz_90);
+        inline constexpr Config k_config_120               = Config::from_hz(k_hz_120);
+        inline constexpr Config k_config_144               = Config::from_hz(k_hz_144);
+        inline constexpr Config k_config_240               = Config::from_hz(k_hz_240);
+        inline constexpr Config k_config_360               = Config::from_hz(k_hz_360);
+        inline constexpr Config k_config_250               = Config::from_hz(k_hz_250);
+        inline constexpr Config k_config_500               = Config::from_hz(k_hz_500);
+        inline constexpr Config k_config_1000              = Config::from_hz(k_hz_1000);
+        inline constexpr Config k_config_2000              = Config::from_hz(k_hz_2000);
+        inline constexpr Config k_config_4000              = Config::from_hz(k_hz_4000);
+        inline constexpr Config k_config_8000              = Config::from_hz(k_hz_8000);
     }
 
-	/**
-	* @brief Advances the timestep runner using the current time from a steady clock.
-	* @return The interpolation alpha value in the range [0, 1], representing the
-	*         fraction of the next fixed timestep that has been accumulated.
-	*/
-    [[nodiscard]] double tick() noexcept { return tick_with_clock(steady_clock::now()); }
-
-	/**
-	* @brief Advances the timestep runner using an externally provided elapsed time.
-	* @param elapsed The elapsed time since the last call, as a std::chrono::nanoseconds duration.
-	* @return The interpolation alpha value in the range [0, 1), representing the
-	*         fraction of the next fixed timestep that has been accumulated.
-	*/
-    [[nodiscard]] double push_time(std::chrono::nanoseconds elapsed) noexcept { return advance(elapsed); }
-
     /**
-	* @brief Sets the target fixed update rate in Hertz.
-    * @details Automatically generates a vector of cycling timesteps if the Hz results
-    * in a non-integer nanosecond period (e.g. 30Hz), ensuring long-term timing accuracy.
-	* @param hz The desired update rate in Hertz. Must be positive.
-	*/
-    void   set_hz(double hz) noexcept
-		{
+     * @brief Fixed timestep runner for deterministic updates.
+     *
+     * @tparam OnStepFunction Callable type for the per-step callback.
+     * The default (std::function<void(nanoseconds)>) is suitable for most use cases.
+	 * @tparam OnErrorFunction Callable type for the error callback when user step code throws.
+	 * @tparam Clock Clock type for tick() timing. Defaults to std::chrono::steady_clock.
+     * @see FixedTimestepRunner — the default std::function-based alias.
+     */
+    template<
+        typename OnStepFunction = std::function<void(std::chrono::nanoseconds)>,
+		typename OnErrorFunction = std::function<void()>,
+        typename Clock = std::chrono::steady_clock>
+    class BasicFixedTimestepRunner {
+    public:
+        BasicFixedTimestepRunner() = default;
+
+        /**
+        * @brief Constructs a runner with the given update function and configuration.
+        * @param fn  The function to call for each fixed update step.
+        * @param config Configuration. Defaults to 60 Hz with step sequencing.
+        */
+        explicit BasicFixedTimestepRunner(OnStepFunction fn, Config config = standards::k_config_60)
+            : m_on_update_function(std::move(fn)), m_config(std::move(config)) { reset(true); }
+
+        /**
+        * @brief Constructs a runner with no update function (push_time / tick only).
+        * @param config Configuration. Defaults to 60 Hz with step sequencing.
+        */
+        explicit BasicFixedTimestepRunner(std::nullptr_t, Config config = standards::k_config_60)
+            : m_config(std::move(config)) { reset(true); }
+
+        /**
+        * @brief Resets internal state (accumulator, telemetry, pause). Does NOT reset stats.
+        * @param start_now If true, records the current time as the baseline for tick(),
+        *                  preventing a large initial delta on the first call.
+        * @see reset_stats() to zero cumulative counters independently.
+        */
+        void reset(bool start_now = true) noexcept {
+            m_accumulator       = std::chrono::nanoseconds(0);
+            m_last_delta        = std::chrono::nanoseconds(0);
+            m_last_steps        = 0;
+            m_paused            = false;
+            m_step_error_caught = false;
+            m_started           = start_now;
+            if (start_now) m_last = Clock::now();
+        }
+
+        /**
+        * @brief Advances using the system steady_clock.
+        * @return Alpha (interpolation factor) in [0, 1).
+        * @note For deterministic operation (tests, replays) prefer push_time().
+        */
+        [[nodiscard]] double tick() noexcept { return tick_with_clock(Clock::now()); }
+
+        /**
+        * @brief Advances using an externally provided elapsed time.
+        * @param elapsed Time since the last call.
+        * @return Alpha (interpolation factor) in [0, 1).
+        * @note Preferred over tick() for deterministic operation (tests, replays, lock-step networking).
+        *       Results are bit-exact across machines because there is no wall-clock dependency.
+        */
+        [[nodiscard]] double push_time(std::chrono::nanoseconds elapsed) noexcept { return advance(elapsed); }
+
+        /**
+        * @brief Sets the target update rate. Regenerates the step sequence automatically.
+        * @param hz Target Hz. Must be positive and finite.
+        */
+        void set_hz(double hz) noexcept {
             if (hz <= 0.0 || !std::isfinite(hz)) return;
-            Config config_timing = Config::from_hz(hz);
-            m_config.target_hz = config_timing.target_hz;
-            m_config.step = config_timing.step;
-			m_config.step_sequence = config_timing.step_sequence;
-			m_config.step_sequence_length = config_timing.step_sequence_length;
-            m_step_sequence_index = 0;
+            Config t = Config::from_hz(hz);
+            m_config.target_hz            = t.target_hz;
+            m_config.step                 = t.step;
+            m_config.step_sequence        = t.step_sequence;
+            m_config.step_sequence_length = t.step_sequence_length;
+            m_step_sequence_index         = 0;
         }
 
-    /**
-    * @brief Gets the target fixed update rate in Hertz.
-    * This may differ from the calculated rate due to rounding, use hz_calculated() for exact value. (60.0 for 16.67ms step)
-    */
-	[[nodiscard]] double hz() const noexcept
-		{ return m_config.target_hz; }
+        /**
+        * @brief Target Hz as originally specified (e.g. 60.0 for 60 Hz).
+        * Preserved for serialization — may differ from hz_calculated() due to rounding.
+        */
+        [[nodiscard]] double hz() const noexcept { return m_config.target_hz; }
 
-    /**
-    * @brief Gets the current fixed update rate in Hertz.
-    * This is calculated based on the actual step duration and may differ from the target rate. (60.0000024 for 16.67ms step)
-    */
-	[[nodiscard]] constexpr double hz_calculated() const noexcept
-		{ return 1.0 / std::chrono::duration<double>(m_config.step).count(); }
+        /**
+        * @brief Actual Hz derived from the integer nanosecond step duration.
+        * May differ slightly from hz() (e.g. 59.9999976 for a 16,666,667 ns step).
+        */
+        [[nodiscard]] constexpr double hz_calculated() const noexcept
+            { return 1.0 / std::chrono::duration<double>(m_config.step).count(); }
 
-	/**
-	* @brief Sets the fixed timestep duration.
-	* @param s The desired fixed timestep duration as a std::chrono::nanoseconds duration.
-	*/
-    void   set_step(std::chrono::nanoseconds s) noexcept {
-        if (s.count() <= 0) return;
-        m_config.step = s;
-        m_config.step_sequence_length = 0;
-        m_step_sequence_index = 0;
-        m_config.target_hz = 1.0 / (static_cast<double>(s.count()) * 1e-9);
-    }
-
-    /// @brief Get the time remaining to the next fixed step in nanoseconds.
-    [[nodiscard]] std::chrono::nanoseconds time_to_next_step() const noexcept
-        { return current_step_duration() - m_accumulator; }
-
-	/// @brief Get the current fixed timestep duration in nanoseconds.
-    [[nodiscard]] constexpr std::chrono::nanoseconds step() const noexcept
-        { return m_config.step; }
-
-	/**
-	* @brief Sets the maximum allowed delta time between updates to prevent spiral of death.
-	* @param d The maximum delta time as a std::chrono::nanoseconds duration.
-	*/
-    void   set_max_delta(std::chrono::nanoseconds d) noexcept {
-        if (d.count() <= 0) return;
-        m_config.safety_max_delta = d;
+        /**
+        * @brief Sets the fixed timestep directly, disabling any step sequence.
+        * @param s Step duration. Must be positive.
+        */
+        void set_step(std::chrono::nanoseconds s) noexcept {
+            if (s.count() <= 0) return;
+            m_config.step                 = s;
+            m_config.step_sequence_length = 0;
+            m_step_sequence_index         = 0;
+            m_config.target_hz            = 1.0 / (static_cast<double>(s.count()) * 1e-9);
         }
 
-	/// @brief Get the current maximum allowed delta time in nanoseconds.
-    [[nodiscard]] std::chrono::nanoseconds max_delta() const noexcept
-        { return m_config.safety_max_delta; }
+        /// @brief Time remaining until the next fixed step fires.
+        [[nodiscard]] std::chrono::nanoseconds time_to_next_step() const noexcept
+            { return current_step_duration() - m_accumulator; }
 
-	/**
-	* @brief Sets the maximum number of fixed update steps to perform per tick to prevent spiral of death.
-	* @param n The maximum number of substeps. Must be positive.
-	*/
-    void    set_max_substeps(size_t n) noexcept {
-        m_config.safety_max_substeps = (n > 0 ? n : size_t{1});
-    }
-	/// @brief Get the current maximum number of fixed update steps per tick.
-    [[nodiscard]] size_t    max_substeps() const noexcept     { return m_config.safety_max_substeps; }
+        /// @brief The base fixed timestep duration (not accounting for sequence cycling).
+        [[nodiscard]] constexpr std::chrono::nanoseconds step() const noexcept
+            { return m_config.step; }
 
-	/**
-	* @brief Sets the time scale factor for speeding up or slowing down time.
-	* @param s The time scale factor. Values > 1.0 speed up time, values < 1.0 slow down time.
-	*            A value of 1.0 represents normal time.
-	*            A value of 0.0 effectively pauses time (use pause() instead for clarity).
-    *            Negative values are clamped to 0.0.
-	*/
-    void   set_time_scale(double s) noexcept {
-        if (s < 0.0) s = 0.0;
-         m_config.time_scale = s;
-        }
-	/// @brief Get the current time scale factor.
-    [[nodiscard]] double time_scale() const noexcept            { return m_config.time_scale; }
-
-	/**
-	* @brief Pauses or unpauses the timestep runner.
-	* @param p If true, pauses the runner; if false, unpauses it. Default is true.
-	* When paused, calls to tick() or push_time() will not advance time or call the update function.
-	*/
-    void   pause(bool p=true) noexcept      { m_paused = p; }
-	/// @brief Returns whether the timestep runner is currently paused.
-    [[nodiscard]] bool   paused() const noexcept               { return m_paused; }
-	/// @brief Unpauses the timestep runner. Alias for pause(false).
-	void   resume() noexcept                { m_paused = false; }
-	/// @brief Toggles the paused state of the timestep runner.
-	void   toggle_pause() noexcept          { m_paused = !m_paused; }
-
-    /**
-	* @brief Get the current accumulator value.
-	* @return The amount of time currently accumulated towards the next fixed timestep, as a std::chrono::nanoseconds duration.
-	*/
-    [[nodiscard]] std::chrono::nanoseconds  accumulator() const noexcept    { return m_accumulator; }
-	/**
-	* @brief Get the last frame's raw delta time before clamping and time scaling.
-	* @return The last frame's delta time as a std::chrono::nanoseconds duration.
-	*/
-    [[nodiscard]] std::chrono::nanoseconds  last_delta() const noexcept     { return m_last_delta; }
-	/**
-	* @brief Get the number of fixed update steps executed in the last tick.
-	* @return The number of fixed update steps executed during the last call to tick() or push_time().
-	*/
-    [[nodiscard]] size_t                    last_steps() const noexcept     { return m_last_steps; }
-	/**
-	* @brief Get the interpolation factor for the last frame.
-	* @return The interpolation factor as a double in the range [0, 1].
-	*/
-    [[nodiscard]] double alpha() const noexcept
-		{ return    static_cast<double>(m_accumulator.count()) /
-			        static_cast<double>(current_step_duration().count());
-    }
-
-     /// @brief Returns whether a step error was caught in user code during the last tick.
-    [[nodiscard]] bool step_error_caught() const noexcept { return m_step_error_caught; }
-
-    /**
-	* @brief Sets the step function to be called for each fixed timestep.
-	* @param fn The step function, which takes a single parameter of type std::chrono::nanoseconds.
-	*/
-    void   set_step_function(OnStepFunction fn)          { m_on_update_function = std::move(fn); }
-	/// @brief Returns whether a step function is set.
-    [[nodiscard]] bool   has_step_function() const noexcept {
-        return static_cast<bool>(m_on_update_function);
-    }
-
-    /**
-	* @brief Sets the error function to be called when a step error is caught.
-	* @param fn The error function, which takes no parameters and returns void.
-	*/
-    void set_error_function(OnErrorFunction fn) { m_on_error_function = std::move(fn); }
-    /// @brief Returns whether an error function is set.
-    [[nodiscard]] bool has_error_function() const noexcept {
-         return static_cast<bool>(m_on_error_function);
+        /**
+        * @brief Clamps large frame deltas to prevent the spiral of death (default: 250 ms).
+        * @param d Maximum allowed delta. Must be positive.
+        */
+        void set_max_delta(std::chrono::nanoseconds d) noexcept {
+            if (d.count() <= 0) return;
+            m_config.safety_max_delta = d;
         }
 
-    /**
-    * @brief Helper to get the step duration for the current cycle index
-    */
-    [[nodiscard]] inline std::chrono::nanoseconds current_step_duration() const noexcept {
-        if (m_config.step_sequence_length > 0)
-            return m_config.step_sequence[m_step_sequence_index];
-        return m_config.step;
-    }
+        /// @brief Current max-delta clamp value.
+        [[nodiscard]] std::chrono::nanoseconds max_delta() const noexcept
+            { return m_config.safety_max_delta; }
 
-private:
-    using steady_clock 				= std::chrono::steady_clock;
-
-	/**
-	* @brief Advances the timestep runner using a provided time point from a steady clock.
-	* @param tick_timepoint The current time point from a steady clock.
-	* @return The interpolation alpha value in the range [0, 1), representing the
-	*         fraction of the next fixed timestep that has been accumulated.
-	*/
-    [[nodiscard]] double tick_with_clock(steady_clock::time_point tick_timepoint) noexcept {
-        if (m_paused) { m_last_delta = std::chrono::nanoseconds(0); m_last_steps = 0; m_last = tick_timepoint; return alpha(); }
-        if (m_last.time_since_epoch().count() == 0) m_last = tick_timepoint; // first call safety
-        auto raw = tick_timepoint - m_last;
-        m_last = tick_timepoint;
-        return advance(std::chrono::duration_cast<std::chrono::nanoseconds>(raw));
-    }
-
-	/**
-	* @brief Advances the timestep runner by a specified elapsed time.
-    * @details This is the core logic that handles clamping, time scaling, stepping, and accumulator management.
-    * It is called by both tick_with_clock() and push_time().
-	* @param raw_elapsed The elapsed time since the last call, as a std::chrono::nanoseconds duration.
-	* @return The interpolation alpha value in the range [0, 1), representing the
-	*         fraction of the next fixed timestep that has been accumulated.
-	*/
-    [[nodiscard]] double advance(std::chrono::nanoseconds raw_elapsed) noexcept {
-        if (m_paused) { m_last_delta = std::chrono::nanoseconds(0); m_last_steps = 0; return alpha(); }
-        m_step_error_caught = false;
-        m_last_delta = raw_elapsed;
-
-		// Clamp [Safety]
-        std::chrono::nanoseconds dt = raw_elapsed;
-        if (dt > m_config.safety_max_delta) dt = m_config.safety_max_delta;
-
-		// Time scale
-        if (m_config.time_scale != 1.0) {
-			    dt = std::chrono::duration_cast<std::chrono::nanoseconds>(dt * m_config.time_scale);
+        /**
+        * @brief Caps fixed steps per tick to prevent the spiral of death (default: 8).
+        * @param n Must be >= 1.
+        */
+        void set_max_substeps(size_t n) noexcept {
+            m_config.safety_max_substeps = (n > 0 ? n : size_t{1});
         }
 
-        m_accumulator += dt;
+        /// @brief Current max-substeps cap.
+        [[nodiscard]] size_t max_substeps() const noexcept { return m_config.safety_max_substeps; }
 
-        // Step Loop [with Safety Cap]
-        size_t steps = 0;
-        std::chrono::nanoseconds current_step_dt = current_step_duration();
-        while (m_accumulator >= current_step_dt && steps < m_config.safety_max_substeps) {
-            try {
-                if (m_on_update_function) m_on_update_function(current_step_dt);
-            } catch (...) {
-                m_step_error_caught = true;
-                if (m_on_error_function) m_on_error_function();
-                // Swallow exceptions from user code to maintain noexcept guarantee
+        /**
+        * @brief Sets the time scale factor.
+        * @param s > 1.0 fast-forward, < 1.0 slow-motion, 0.0 effective pause.
+        *   Negative values are clamped to 0.0. Non-finite values (NaN, Inf) are ignored.
+        */
+        void set_time_scale(double s) noexcept {
+            if (!std::isfinite(s)) return;
+            m_config.time_scale = (s < 0.0) ? 0.0 : s;
+        }
+
+        /// @brief Current time scale factor.
+        [[nodiscard]] double time_scale() const noexcept { return m_config.time_scale; }
+
+        /**
+        * @brief Pauses or resumes the runner.
+        * While paused, tick() and push_time() return immediately without stepping.
+        */
+        void   pause(bool p = true) noexcept { m_paused = p; }
+        /// @brief True if the runner is currently paused.
+        [[nodiscard]] bool   paused() const noexcept { return m_paused; }
+        /// @brief Alias for pause(false).
+        void   resume() noexcept { m_paused = false; }
+        /// @brief Flips the paused state.
+        void   toggle_pause() noexcept { m_paused = !m_paused; }
+
+        /// @brief Time buffered toward the next fixed step.
+        [[nodiscard]] std::chrono::nanoseconds accumulator() const noexcept { return m_accumulator; }
+
+        /// @brief Raw elapsed time from the last tick/push_time call, before clamping or scaling.
+        [[nodiscard]] std::chrono::nanoseconds last_delta() const noexcept { return m_last_delta; }
+
+        /// @brief Number of fixed steps executed during the last tick/push_time call.
+        [[nodiscard]] size_t last_steps() const noexcept { return m_last_steps; }
+
+        /// @brief Render-interpolation factor in [0, 1] towards the next fixed step.
+        [[nodiscard]] double alpha() const noexcept {
+            return static_cast<double>(m_accumulator.count()) /
+                   static_cast<double>(current_step_duration().count());
+        }
+
+        /// @brief Checks if enough time has accumulated to trigger at least one fixed step.
+        [[nodiscard]] bool can_step() const noexcept {
+            return m_accumulator >= current_step_duration();
+        }
+
+        /// @brief True if an exception was caught in user step code during the last tick.
+        [[nodiscard]] bool step_error_caught() const noexcept { return m_step_error_caught; }
+
+#ifndef ISHAP_DISABLE_STATS
+        /**
+        * @brief Returns a snapshot of cumulative diagnostic counters.
+        * Counters accumulate across resets; use reset_stats() to clear them.
+        */
+        [[nodiscard]] Stats stats() const noexcept { return m_stats; }
+
+        /// @brief Zeroes all cumulative stat counters without affecting runner state.
+        void reset_stats() noexcept { m_stats = {}; }
+#endif
+
+        /**
+        * @brief Replaces the step callback.
+        * For concrete-type runners (non-std::function OnStepFunction), the new callable
+        * must be the same type as the one used at construction.
+        */
+        void set_step_function(OnStepFunction fn) { m_on_update_function = std::move(fn); }
+
+        /// @brief True if a step callback is currently installed.
+        [[nodiscard]] bool has_step_function() const noexcept {
+            if (!m_on_update_function.has_value()) return false;
+            // For std::function (and any type with explicit operator bool), also check inner validity.
+            if constexpr (std::is_constructible_v<bool, const OnStepFunction&>)
+                return static_cast<bool>(*m_on_update_function);
+            return true;
+        }
+
+        /// @brief Sets the callback invoked when user step code throws an exception.
+        void set_error_function(OnErrorFunction fn) { m_on_error_function = std::move(fn); }
+
+        /// @brief True if an error callback is currently installed.
+        [[nodiscard]] bool has_error_function() const noexcept {
+            if (!m_on_error_function.has_value()) return false;
+            if constexpr (std::is_constructible_v<bool, const OnErrorFunction&>)
+                return static_cast<bool>(*m_on_error_function);
+            return true;
+        }
+
+        /// @brief Step duration for the current position in the cycling sequence.
+        [[nodiscard]] std::chrono::nanoseconds current_step_duration() const noexcept {
+            if (m_config.step_sequence_length > 0)
+                return m_config.step_sequence[m_step_sequence_index];
+            return m_config.step;
+        }
+
+    private:
+        using time_point = typename Clock::time_point;
+        time_point                      m_last{};
+
+        [[nodiscard]] double tick_with_clock(time_point tick_timepoint) noexcept {
+            if (m_paused) {
+                m_last_delta = std::chrono::nanoseconds(0);
+                m_last_steps = 0;
+                m_last = tick_timepoint;
+                return alpha();
             }
-            m_accumulator -= current_step_dt;
-            ++steps;
-
-            // Advance step sequence index if applicable
-            if (m_config.step_sequence_length > 0) {
-                m_step_sequence_index = (m_step_sequence_index + 1) % m_config.step_sequence_length;
-                current_step_dt = current_step_duration();
-            }
+            if (!m_started) { m_started = true; m_last = tick_timepoint; }
+            auto raw = tick_timepoint - m_last;
+            m_last = tick_timepoint;
+            return advance(std::chrono::duration_cast<std::chrono::nanoseconds>(raw));
         }
-        m_last_steps = steps;
 
-		// Trim excess accumulator [With Safety Cap]
-		const std::chrono::nanoseconds max_acc = current_step_dt * m_config.safety_max_accumulator_overflow;
-		if (m_accumulator > max_acc) { m_accumulator = max_acc; }
+        [[nodiscard]] double advance(std::chrono::nanoseconds raw_elapsed) noexcept {
+            if (m_paused) { m_last_delta = std::chrono::nanoseconds(0); m_last_steps = 0; return alpha(); }
+            m_step_error_caught = false;
+            m_last_delta = raw_elapsed;
 
-        // Return (trimmed) alpha for interpolation into next step
-        return alpha();
-    }
+            // Clamp [Safety]
+            std::chrono::nanoseconds dt = raw_elapsed;
+            if (dt > m_config.safety_max_delta) {
+                dt = m_config.safety_max_delta;
+#ifndef ISHAP_DISABLE_STATS
+                ++m_stats.clamped_delta_events;
+#endif
+            }
 
-private:
-	/// @brief Update / Step function to call each fixed step
-    OnStepFunction              	m_on_update_function{};
-	/// @brief Configuration settings for the timestep runner
-    Config                        	m_config{};
+            // Time scale
+            if (m_config.time_scale != 1.0) {
+                dt = std::chrono::duration_cast<std::chrono::nanoseconds>(dt * m_config.time_scale);
+            }
 
-	/// @brief Last time point recorded (for tick())
-    steady_clock::time_point      	m_last{};
-	/// @brief Accumulator for leftover time between steps
-    std::chrono::nanoseconds      	m_accumulator{0};
-    /// @brief Index into step_sequence for cycling timesteps
-    size_t                        	m_step_sequence_index{0};
-	/// @brief Paused state
-    bool                          	m_paused{false};
+            m_accumulator += dt;
 
-    /// @brief Step Error Caught
-    bool                            m_step_error_caught{false};
-    /// @brief Optional error callback for step errors
-    OnErrorFunction                 m_on_error_function{};
+            // Step loop [with safety cap]
+            size_t steps = 0;
+            std::chrono::nanoseconds current_step_dt = current_step_duration();
+            while (m_accumulator >= current_step_dt && steps < m_config.safety_max_substeps) {
+                try {
+                    if (has_step_function()) (*m_on_update_function)(current_step_dt);
+                } catch (...) {
+                    m_step_error_caught = true;
+                    if (has_error_function()) (*m_on_error_function)();
+                    // Swallow exceptions from user code to maintain noexcept guarantee
+                }
+                m_accumulator -= current_step_dt;
+                ++steps;
 
-	// --- Telemetry ---
-	/// @brief Frame delta tracking (pre-clamp, pre-scale) for telemetry
-    std::chrono::nanoseconds      	m_last_delta{0};
-	/// @brief Number of steps taken in last tick for telemetry
-    size_t                        	m_last_steps{0};
-};
+                // Advance step sequence index if applicable
+                if (m_config.step_sequence_length > 0) {
+                    m_step_sequence_index = (m_step_sequence_index + 1) % m_config.step_sequence_length;
+                    current_step_dt = current_step_duration();
+                }
+            }
+#ifndef ISHAP_DISABLE_STATS
+            if (steps == m_config.safety_max_substeps && m_accumulator >= current_step_dt) {
+                ++m_stats.dropped_step_events;
+            }
+#endif
+            m_last_steps = steps;
+#ifndef ISHAP_DISABLE_STATS
+            m_stats.total_steps += steps;
+            ++m_stats.total_ticks;
+#endif
+            const std::chrono::nanoseconds overflow_cap =
+                current_step_dt * m_config.safety_max_accumulator_overflow;
+            if (m_accumulator > overflow_cap) { m_accumulator = overflow_cap; }
 
+            return alpha();
+        }
+    private:
+        std::optional<OnStepFunction>   m_on_update_function{};
+        Config                          m_config{};
+        bool                            m_started{false};
+        std::chrono::nanoseconds        m_accumulator{0};
+        size_t                          m_step_sequence_index{0};
+        bool                            m_paused{false};
+        bool                            m_step_error_caught{false};
+        std::optional<OnErrorFunction>  m_on_error_function{};
+#ifndef ISHAP_DISABLE_STATS
+        Stats                           m_stats{};
+#endif
+        std::chrono::nanoseconds        m_last_delta{0};
+        size_t                          m_last_steps{0};
+    };
+    /// @brief Standard alias using std::function for the step callback.
+    using FixedTimestepRunner = BasicFixedTimestepRunner<>;
 } // namespace ishap::timestep

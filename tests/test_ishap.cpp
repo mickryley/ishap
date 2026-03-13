@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <ishap/ishap.hpp>
+#include <limits>
 #include <thread>
 
 using namespace std::chrono_literals;
@@ -115,6 +116,45 @@ TEST(IshapTests, UserCodeExceptionHandling) {
 
     EXPECT_TRUE(runner.step_error_caught());
     EXPECT_TRUE(error_called);
+}
+
+TEST(IshapTests, ErrorFunctionHasValueQuery) {
+    ishap::timestep::FixedTimestepRunner runner{
+        [](auto){ throw std::runtime_error("boom"); },
+        {.step = 10ms}
+    };
+
+    EXPECT_FALSE(runner.has_error_function());
+
+    bool called = false;
+    runner.set_error_function([&]{ called = true; });
+    EXPECT_TRUE(runner.has_error_function());
+
+    [[maybe_unused]] const double a = runner.push_time(10ms);
+    EXPECT_TRUE(called);
+}
+
+TEST(IshapTests, ExceptionWithNoErrorFunctionIsSafe) {
+    ishap::timestep::FixedTimestepRunner runner{
+        [](auto){ throw std::runtime_error("unhandled"); },
+        {.step = 10ms}
+    };
+
+    EXPECT_FALSE(runner.has_error_function());
+    EXPECT_NO_THROW({
+        [[maybe_unused]] const double a = runner.push_time(10ms);
+    });
+    EXPECT_TRUE(runner.step_error_caught());
+}
+
+TEST(IshapTests, NullErrorFunctionReportsNotInstalled) {
+    // Assigning a null std::function must make has_error_function() return false.
+    ishap::timestep::FixedTimestepRunner runner;
+    runner.set_error_function([]{});
+    EXPECT_TRUE(runner.has_error_function());
+
+    runner.set_error_function(nullptr); // empty std::function stored in optional
+    EXPECT_FALSE(runner.has_error_function());
 }
 
 TEST(IshapTests, InvalidInputs) {
@@ -405,4 +445,114 @@ TEST(IshapTests, ConstexprStandardsInitialization) {
     EXPECT_DOUBLE_EQ(ntsc_runner.hz(), 24.0 * 1000.0 / 1001.0);
 
     EXPECT_EQ(ntsc_runner.current_step_duration(), std::chrono::nanoseconds(41'708'333));
+}
+
+TEST(IshapTests, TimeScaleNonFiniteIsIgnored) {
+    ishap::timestep::FixedTimestepRunner runner;
+    runner.set_time_scale(1.5);
+
+    runner.set_time_scale(std::numeric_limits<double>::quiet_NaN());
+    EXPECT_DOUBLE_EQ(runner.time_scale(), 1.5) << "NaN should be ignored";
+
+    runner.set_time_scale(std::numeric_limits<double>::infinity());
+    EXPECT_DOUBLE_EQ(runner.time_scale(), 1.5) << "+Inf should be ignored";
+
+    runner.set_time_scale(-std::numeric_limits<double>::infinity());
+    EXPECT_DOUBLE_EQ(runner.time_scale(), 1.5) << "-Inf should be ignored";
+}
+
+#ifndef ISHAP_DISABLE_STATS
+
+TEST(IshapTests, StatsTotalTicksAndSteps) {
+    ishap::timestep::FixedTimestepRunner runner{
+        [](auto){},
+        {.step = 10ms}
+    };
+
+    // push 15ms → 1 step (accumulator = 5ms)
+    [[maybe_unused]] const double a1 = runner.push_time(15ms);
+    // push 15ms → 2 steps (5+15=20ms → 2×10ms, accumulator = 0ms)
+    [[maybe_unused]] const double a2 = runner.push_time(15ms);
+
+    EXPECT_EQ(runner.stats().total_ticks, 2u);
+    EXPECT_EQ(runner.stats().total_steps, 3u);
+    EXPECT_EQ(runner.stats().clamped_delta_events, 0u);
+    EXPECT_EQ(runner.stats().dropped_step_events, 0u);
+}
+
+TEST(IshapTests, StatsClampedDeltaEvent) {
+    ishap::timestep::FixedTimestepRunner runner{
+        [](auto){},
+        {.step = 10ms, .safety_max_delta = 50ms}
+    };
+
+    // 200ms > 50ms max_delta → one clamped_delta_event
+    [[maybe_unused]] const double a = runner.push_time(200ms);
+    EXPECT_EQ(runner.stats().clamped_delta_events, 1u);
+}
+
+TEST(IshapTests, StatsDroppedStepEvent) {
+    ishap::timestep::FixedTimestepRunner runner{
+        [](auto){},
+        {.step = 10ms, .safety_max_substeps = 2}
+    };
+
+    // 50ms / 10ms = 5 steps needed, cap = 2 → 30ms left → dropped_step_events = 1
+    [[maybe_unused]] const double a = runner.push_time(50ms);
+    EXPECT_EQ(runner.stats().dropped_step_events, 1u);
+    EXPECT_EQ(runner.stats().total_steps, 2u);
+}
+
+TEST(IshapTests, StatsResetStats) {
+    ishap::timestep::FixedTimestepRunner runner{
+        [](auto){},
+        {.step = 10ms}
+    };
+
+    [[maybe_unused]] const double a = runner.push_time(30ms);
+    EXPECT_EQ(runner.stats().total_ticks, 1u);
+
+    runner.reset_stats();
+    EXPECT_EQ(runner.stats().total_ticks, 0u);
+    EXPECT_EQ(runner.stats().total_steps, 0u);
+    EXPECT_EQ(runner.stats().clamped_delta_events, 0u);
+    EXPECT_EQ(runner.stats().dropped_step_events, 0u);
+}
+
+TEST(IshapTests, StatsNotClearedByReset) {
+    // reset() clears per-tick telemetry but must NOT clear cumulative stats.
+    ishap::timestep::FixedTimestepRunner runner{
+        [](auto){},
+        {.step = 10ms}
+    };
+
+    [[maybe_unused]] const double a = runner.push_time(30ms);
+    EXPECT_EQ(runner.stats().total_ticks, 1u);
+
+    runner.reset();
+    EXPECT_EQ(runner.stats().total_ticks, 1u) << "reset() must not clear stats";
+}
+
+#endif // ISHAP_DISABLE_STATS
+
+TEST(IshapTests, CanStepFalseAfterFullDrain) {
+    // Normal case: push_time fires all steps, leaving a partial accumulator < step.
+    ishap::timestep::FixedTimestepRunner runner{nullptr, {.step = 10ms}};
+    [[maybe_unused]] const double a = runner.push_time(15ms); // 1 step fires, accumulator = 5ms
+    EXPECT_FALSE(runner.can_step()); // 5ms < 10ms
+}
+
+TEST(IshapTests, CanStepTrueWhenSubstepCapLeavesRemainder) {
+    // When the substep cap prevents full draining, can_step() reports time is still pending.
+    ishap::timestep::FixedTimestepRunner runner{
+        nullptr, {.step = 10ms, .safety_max_substeps = 1}
+    };
+    [[maybe_unused]] const double a = runner.push_time(25ms); // cap=1: 1 step fires (10ms), accumulator = 15ms
+    EXPECT_TRUE(runner.can_step()); // 15ms >= 10ms
+}
+
+TEST(IshapTests, CanStepFalseOnExactDrain) {
+    ishap::timestep::FixedTimestepRunner runner{nullptr, {.step = 10ms}};
+    [[maybe_unused]] const double a = runner.push_time(30ms); // exactly 3 steps, accumulator = 0ms
+    EXPECT_FALSE(runner.can_step());
 }
